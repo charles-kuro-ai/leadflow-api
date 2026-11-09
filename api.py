@@ -129,15 +129,8 @@ def verify_token(token):
 
 @app.route("/scrape", methods=["POST"])
 def scrape():
-    # Verify caller is a real authenticated Supabase user
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.replace("Bearer ", "").strip()
-    if not token:
-        return jsonify({"error": "Missing authorization token"}), 401
-
-    user_id = verify_token(token)
-    if not user_id:
-        return jsonify({"error": "Invalid or expired token"}), 401
+    # TEMPORARY: hardcoded user_id for local testing
+    user_id = "4d8b562f-e1b2-4e65-af90-4aaf6ec451f2"
 
     data = request.json or {}
     cities         = data.get("cities", ["Lagos"])
