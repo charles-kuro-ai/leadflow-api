@@ -54,7 +54,7 @@ def search_places(query, city, max_results=20):
     except:
         return []
 
-def push_lead(supabase, place, city, business_type):
+def push_lead(supabase, place, city, business_type, user_id):
     name  = place.get("displayName", {}).get("text", "").strip()
     phone = place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber") or None
     address = place.get("formattedAddress", city).strip()
@@ -65,7 +65,8 @@ def push_lead(supabase, place, city, business_type):
     if not name:
         return False
 
-    check = supabase.table("leads").select("id").eq("name", name).eq("location", city).execute()
+    # Duplicate check scoped to this user
+    check = supabase.table("leads").select("id").eq("name", name).eq("location", city).eq("user_id", user_id).execute()
     if check.data:
         return False
 
@@ -74,11 +75,12 @@ def push_lead(supabase, place, city, business_type):
         "tier": tier, "score": score, "source": "Google Maps",
         "status": "New", "agent": None, "income": None,
         "business_type": btype, "notes": address,
+        "user_id": user_id,
     }
     result = supabase.table("leads").insert(lead).execute()
     return bool(result.data)
 
-def run_scraper(job_id, cities, business_types, max_per_search):
+def run_scraper(job_id, cities, business_types, max_per_search, user_id):
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     jobs[job_id]["status"] = "running"
     jobs[job_id]["added"] = 0
@@ -91,7 +93,7 @@ def run_scraper(job_id, cities, business_types, max_per_search):
                 break
             places = search_places(btype, city, max_per_search)
             for p in places:
-                if push_lead(supabase, p, city, btype):
+                if push_lead(supabase, p, city, btype, user_id):
                     jobs[job_id]["added"] += 1
             jobs[job_id]["total_searched"] += 1
             jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
@@ -103,8 +105,27 @@ def run_scraper(job_id, cities, business_types, max_per_search):
 def home():
     return jsonify({"status": "LeadFlow API running"})
 
+def verify_token(token):
+    """Verify Supabase JWT and return user_id, or None if invalid."""
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        result = supabase.auth.get_user(token)
+        return result.user.id if result.user else None
+    except Exception:
+        return None
+
 @app.route("/scrape", methods=["POST"])
 def scrape():
+    # Verify caller is a real authenticated Supabase user
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    if not token:
+        return jsonify({"error": "Missing authorization token"}), 401
+
+    user_id = verify_token(token)
+    if not user_id:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
     data = request.json or {}
     cities         = data.get("cities", ["Lagos"])
     business_types = data.get("business_types", ["supermarket"])
@@ -114,7 +135,7 @@ def scrape():
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {"status": "starting", "added": 0, "progress": 0}
 
-    t = threading.Thread(target=run_scraper, args=(job_id, cities, business_types, max_per_search))
+    t = threading.Thread(target=run_scraper, args=(job_id, cities, business_types, max_per_search, user_id))
     t.daemon = True
     t.start()
 
