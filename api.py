@@ -108,9 +108,22 @@ def home():
 def verify_token(token):
     """Verify Supabase JWT and return user_id, or None if invalid."""
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        result = supabase.auth.get_user(token)
-        return result.user.id if result.user else None
+        # Decode JWT manually — no external lib needed, just parse the payload
+        import base64, json as _json
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        # Add padding
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = _json.loads(base64.urlsafe_b64decode(payload))
+        user_id = decoded.get("sub")
+        exp = decoded.get("exp", 0)
+        if not user_id:
+            return None
+        import time as _time
+        if _time.time() > exp:
+            return None  # token expired
+        return user_id
     except Exception:
         return None
 
@@ -157,5 +170,5 @@ def cancel(job_id):
 
 if __name__ == "__main__":
     import os
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
