@@ -88,18 +88,25 @@ def run_scraper(job_id, cities, business_types, max_per_search, user_id):
     total = len(cities) * len(business_types)
 
     for city in cities:
+        if jobs[job_id].get("cancelled"):
+            break
         for btype in business_types:
             if jobs[job_id].get("cancelled"):
                 break
             places = search_places(btype, city, max_per_search)
             for p in places:
+                if jobs[job_id].get("cancelled"):
+                    break
                 if push_lead(supabase, p, city, btype, user_id):
                     jobs[job_id]["added"] += 1
             jobs[job_id]["total_searched"] += 1
             jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
             time.sleep(0.3)
 
-    jobs[job_id]["status"] = "done"
+    if jobs[job_id].get("cancelled"):
+        jobs[job_id]["status"] = "cancelled"
+    else:
+        jobs[job_id]["status"] = "done"
 
 @app.route("/", methods=["GET"])
 def home():
