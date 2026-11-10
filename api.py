@@ -1,17 +1,11 @@
 """
 LeadFlow Nigeria — Scraper API
-Deploy this to Railway. The dashboard calls it to trigger lead scraping.
 """
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import threading
-import os
-import uuid
-import base64
-import json
-import time
+import os, uuid, base64, json, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
@@ -21,31 +15,31 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 SUPABASE_URL   = os.environ.get("SUPABASE_URL", "https://jyigungffdpqdgknhqao.supabase.co")
 SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")
 
-# Track running jobs
 jobs = {}
 
 BUSINESS_KEYWORDS = {
-    "Supermarket":       ["supermarket", "grocery store", "food market"],
-    "Pharmacy":          ["pharmacy", "chemist", "drug store"],
-    "Hotel":             ["hotel", "guest house", "lodge"],
-    "Restaurant":        ["restaurant", "eatery", "food canteen"],
-    "Hospital":          ["hospital", "medical centre", "clinic"],
-    "School":            ["school", "academy", "college"],
-    "Logistics":         ["logistics company", "courier service", "transport company"],
-    "Filling Station":   ["filling station", "petrol station", "fuel station"],
-    "Hardware Store":    ["hardware store", "building materials", "ironmonger"],
-    "Fashion Shop":      ["fashion shop", "boutique", "clothing store"],
+    "Supermarket": ["supermarket", "grocery store", "food market"],
+    "Pharmacy": ["pharmacy", "chemist", "drug store"],
+    "Hotel": ["hotel", "guest house", "lodge"],
+    "Restaurant": ["restaurant", "eatery", "food canteen"],
+    "Hospital": ["hospital", "medical centre", "clinic"],
+    "School": ["school", "academy", "college"],
+    "Logistics": ["logistics company", "courier service", "transport company"],
+    "Filling Station": ["filling station", "petrol station", "fuel station"],
+    "Hardware Store": ["hardware store", "building materials", "ironmonger"],
+    "Fashion Shop": ["fashion shop", "boutique", "clothing store"],
     "Electronics Store": ["electronics store", "phone shop", "computer shop"],
-    "Church":            ["church", "ministry", "evangelical church"],
-    "Mosque":            ["mosque", "islamic centre", "masjid"],
-    "Market":            ["market", "trade centre", "shopping complex"],
-    "Salon":             ["salon", "barber shop", "hair stylist"],
-    "Bakery":            ["bakery", "bread shop", "confectionery"],
-    "Printing Press":    ["printing press", "print shop", "signage company"],
-    "Clinic":            ["clinic", "medical centre", "health centre"],
+    "Church": ["church", "ministry", "evangelical church"],
+    "Mosque": ["mosque", "islamic centre", "masjid"],
+    "Market": ["market", "trade centre", "shopping complex"],
+    "Salon": ["salon", "barber shop", "hair stylist"],
+    "Bakery": ["bakery", "bread shop", "confectionery"],
+    "Printing Press": ["printing press", "print shop", "signage company"],
+    "Clinic": ["clinic", "medical centre", "health centre"],
 }
 
-# ── Supabase REST helpers (no supabase library needed) ──────────────────────
+def get_keywords_for_type(business_type):
+    return BUSINESS_KEYWORDS.get(business_type, [business_type])
 
 def sb_headers():
     return {
@@ -55,8 +49,7 @@ def sb_headers():
         "Prefer": "return=representation",
     }
 
-def sb_select(table, filters: dict):
-    """Return rows matching all filters."""
+def sb_select(table, filters):
     params = {k: f"eq.{v}" for k, v in filters.items()}
     params["select"] = "id"
     try:
@@ -71,14 +64,11 @@ def sb_select(table, filters: dict):
         print(f"[SELECT EXCEPTION] {e}")
         return []
 
-def sb_insert(table, row: dict):
-    """Insert a row. Returns True on success."""
+def sb_insert(table, row):
     r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=sb_headers(), json=row, timeout=10)
     if not r.ok:
         print(f"[INSERT ERROR] {r.status_code}: {r.text}")
     return r.ok
-
-# ── Business logic ──────────────────────────────────────────────────────────
 
 def assign_tier(business_type, name):
     combined = (business_type + " " + name).lower()
@@ -103,11 +93,7 @@ def search_places(query, city, max_results=20):
         "X-Goog-Api-Key": GOOGLE_API_KEY,
         "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.userRatingCount,places.primaryTypeDisplayName,places.websiteUri"
     }
-    body = {
-        "textQuery": f"{query} in {city}, Nigeria",
-        "maxResultCount": min(max_results, 20),
-        "languageCode": "en"
-    }
+    body = {"textQuery": f"{query} in {city}, Nigeria", "maxResultCount": min(max_results, 20), "languageCode": "en"}
     try:
         r = requests.post(url, headers=headers, json=body, timeout=15)
         return r.json().get("places", [])
@@ -122,125 +108,82 @@ def push_lead(place, city, business_type, user_id):
     btype   = place.get("primaryTypeDisplayName", {}).get("text", business_type).title()
     tier    = assign_tier(btype, name)
     score   = calc_score(place)
-
     if not name:
         return False
-
-    # Duplicate check temporarily disabled for debugging
-    # existing = sb_select("leads", {"name": name, "location": city, "user_id": user_id})
-    # if existing:
-    #     print(f"[DUPLICATE] {name}")
-    #     return False
-
+    # Duplicate check
+    existing = sb_select("leads", {"name": name, "location": city})
+    if existing:
+        print(f"[SKIP] Duplicate: {name}")
+        return False
     lead = {
         "name": name, "phone": phone, "location": city,
         "tier": tier, "score": score, "source": "Google Maps",
         "status": "New", "agent": None, "income": None,
-        "business_type": btype, "notes": address,
-        "user_id": user_id,
+        "business_type": btype, "notes": address, "user_id": user_id,
     }
     return sb_insert("leads", lead)
 
-def run_scraper(job_id, cities, business_types, max_per_search, user_id):
+def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id):
     jobs[job_id]["status"] = "running"
     jobs[job_id]["added"] = 0
     jobs[job_id]["total_searched"] = 0
 
+    # Build search list: for each city + business_type, use only selected keywords
     searches = []
     for city in cities:
         for btype in business_types:
-            keywords = BUSINESS_KEYWORDS.get(btype, [btype])
-            for kw in keywords:
+            selected_keywords = keywords_map.get(btype, [btype])
+            for kw in selected_keywords:
                 searches.append((city, btype, kw))
 
     total = len(searches)
     jobs[job_id]["total"] = total
 
     def do_search(city, btype, keyword):
-        if jobs[job_id].get("cancelled"):
-            return 0
-        places = search_places(keyword, city, max_per_search)
+        # Stop if cancelled or max_total reached
+        if jobs[job_id].get("cancelled"): return 0
+        if jobs[job_id]["added"] >= max_total: return 0
+
+        remaining = max_total - jobs[job_id]["added"]
+        fetch_count = min(remaining, 20)
+
+        places = search_places(keyword, city, fetch_count)
         print(f"[SEARCH] '{keyword}' in {city} → {len(places)} places")
         added = 0
         for p in places:
-            if jobs[job_id].get("cancelled"):
-                break
+            if jobs[job_id].get("cancelled"): break
+            if jobs[job_id]["added"] >= max_total: break
             if push_lead(p, city, btype, user_id):
                 added += 1
+                jobs[job_id]["added"] += 1
         jobs[job_id]["total_searched"] += 1
         jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
         return added
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(do_search, city, btype, kw): (city, btype, kw) for city, btype, kw in searches}
+        futures = {executor.submit(do_search, c, b, kw): (c, b, kw) for c, b, kw in searches}
         for future in as_completed(futures):
-            if jobs[job_id].get("cancelled"):
-                break
-            jobs[job_id]["added"] += future.result()
+            if jobs[job_id].get("cancelled"): break
+            if jobs[job_id]["added"] >= max_total: break
+            future.result()
 
     jobs[job_id]["status"] = "cancelled" if jobs[job_id].get("cancelled") else "done"
-
-# ── JWT verification ────────────────────────────────────────────────────────
 
 def verify_token(token):
     try:
         parts = token.split(".")
-        if len(parts) != 3:
-            return None
+        if len(parts) != 3: return None
         payload = parts[1] + "=" * (-len(parts[1]) % 4)
         decoded = json.loads(base64.urlsafe_b64decode(payload))
         user_id = decoded.get("sub")
         exp = decoded.get("exp", 0)
-        if not user_id or time.time() > exp:
-            return None
+        if not user_id or time.time() > exp: return None
         return user_id
-    except Exception:
-        return None
-
-# ── Routes ──────────────────────────────────────────────────────────────────
+    except: return None
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "LeadFlow API running"})
-
-@app.route("/scrape", methods=["POST"])
-def scrape():
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.replace("Bearer ", "").strip()
-    if not token:
-        return jsonify({"error": "Missing authorization token"}), 401
-
-    user_id = verify_token(token)
-    if not user_id:
-        return jsonify({"error": "Invalid or expired token"}), 401
-
-    data = request.json or {}
-    cities         = data.get("cities", ["Lagos"])
-    business_types = data.get("business_types", ["supermarket"])
-    max_per_search = min(int(data.get("max_per_search", 20)), 20)
-
-    job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"status": "starting", "added": 0, "progress": 0}
-
-    t = threading.Thread(target=run_scraper, args=(job_id, cities, business_types, max_per_search, user_id))
-    t.daemon = True
-    t.start()
-
-    return jsonify({"job_id": job_id, "message": "Scraper started"})
-
-@app.route("/status/<job_id>", methods=["GET"])
-def status(job_id):
-    job = jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
-
-@app.route("/cancel/<job_id>", methods=["POST"])
-def cancel(job_id):
-    if job_id in jobs:
-        jobs[job_id]["cancelled"] = True
-        return jsonify({"message": "Cancelling..."})
-    return jsonify({"error": "Job not found"}), 404
 
 @app.route("/debug", methods=["GET"])
 def debug():
@@ -250,6 +193,49 @@ def debug():
         "key_start": key[:10] if key else "EMPTY",
         "key_end": key[-5:] if key else "EMPTY"
     })
+
+@app.route("/keywords", methods=["GET"])
+def get_keywords():
+    return jsonify(BUSINESS_KEYWORDS)
+
+@app.route("/scrape", methods=["POST"])
+def scrape():
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    if not token: return jsonify({"error": "Missing authorization token"}), 401
+    user_id = verify_token(token)
+    if not user_id: return jsonify({"error": "Invalid or expired token"}), 401
+
+    data = request.json or {}
+    cities = data.get("cities", ["Lagos"])
+    business_types = data.get("business_types", [])
+    keywords_map = data.get("keywords_map", {})  # e.g. {"Pharmacy": ["pharmacy", "chemist"]}
+    max_total = min(int(data.get("max_total", 20)), 500)
+
+    # If no keywords_map provided, use all defaults
+    if not keywords_map:
+        for btype in business_types:
+            keywords_map[btype] = BUSINESS_KEYWORDS.get(btype, [btype])
+
+    job_id = str(uuid.uuid4())[:8]
+    jobs[job_id] = {"status": "starting", "added": 0, "progress": 0}
+    t = threading.Thread(target=run_scraper, args=(job_id, cities, business_types, keywords_map, max_total, user_id))
+    t.daemon = True
+    t.start()
+    return jsonify({"job_id": job_id, "message": "Scraper started"})
+
+@app.route("/status/<job_id>", methods=["GET"])
+def status(job_id):
+    job = jobs.get(job_id)
+    if not job: return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+@app.route("/cancel/<job_id>", methods=["POST"])
+def cancel(job_id):
+    if job_id in jobs:
+        jobs[job_id]["cancelled"] = True
+        return jsonify({"message": "Cancelling..."})
+    return jsonify({"error": "Job not found"}), 404
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
