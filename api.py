@@ -242,6 +242,15 @@ def cancel(job_id):
         return jsonify({"message": "Cancelling..."})
     return jsonify({"error": "Job not found"}), 404
 
+@app.route("/debug", methods=["GET"])
+def debug():
+    key = GOOGLE_API_KEY
+    return jsonify({
+        "key_length": len(key),
+        "key_start": key[:10] if key else "EMPTY",
+        "key_end": key[-5:] if key else "EMPTY"
+    })
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
