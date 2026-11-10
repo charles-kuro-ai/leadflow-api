@@ -126,11 +126,11 @@ def push_lead(place, city, business_type, user_id):
     if not name:
         return False
 
-    # Duplicate check
-    existing = sb_select("leads", {"name": name, "location": city, "user_id": user_id})
-    if existing:
-        print(f"[DUPLICATE] {name}")
-        return False
+    # Duplicate check temporarily disabled for debugging
+    # existing = sb_select("leads", {"name": name, "location": city, "user_id": user_id})
+    # if existing:
+    #     print(f"[DUPLICATE] {name}")
+    #     return False
 
     lead = {
         "name": name, "phone": phone, "location": city,
