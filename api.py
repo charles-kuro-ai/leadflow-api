@@ -59,8 +59,17 @@ def sb_select(table, filters: dict):
     """Return rows matching all filters."""
     params = {k: f"eq.{v}" for k, v in filters.items()}
     params["select"] = "id"
-    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=sb_headers(), params=params, timeout=10)
-    return r.json() if r.ok else []
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=sb_headers(), params=params, timeout=10)
+        if r.ok:
+            data = r.json()
+            return data if isinstance(data, list) else []
+        else:
+            print(f"[SELECT ERROR] {r.status_code}: {r.text}")
+            return []
+    except Exception as e:
+        print(f"[SELECT EXCEPTION] {e}")
+        return []
 
 def sb_insert(table, row: dict):
     """Insert a row. Returns True on success."""
@@ -120,6 +129,7 @@ def push_lead(place, city, business_type, user_id):
     # Duplicate check
     existing = sb_select("leads", {"name": name, "location": city, "user_id": user_id})
     if existing:
+        print(f"[DUPLICATE] {name}")
         return False
 
     lead = {
@@ -150,6 +160,7 @@ def run_scraper(job_id, cities, business_types, max_per_search, user_id):
         if jobs[job_id].get("cancelled"):
             return 0
         places = search_places(keyword, city, max_per_search)
+        print(f"[SEARCH] '{keyword}' in {city} → {len(places)} places")
         added = 0
         for p in places:
             if jobs[job_id].get("cancelled"):
