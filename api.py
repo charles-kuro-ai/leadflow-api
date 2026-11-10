@@ -8,6 +8,7 @@ from flask_cors import CORS
 import requests
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from supabase import create_client
 
 app = Flask(__name__)
@@ -19,6 +20,28 @@ SUPABASE_KEY   = "sb_publishable_Am7kFgOwqUw6BWWwElm0pw_0nS_wzHP"
 
 # Track running jobs
 jobs = {}
+
+# Multiple search terms per business type — each returns different results from Google
+BUSINESS_KEYWORDS = {
+    "Supermarket":     ["supermarket", "grocery store", "food market"],
+    "Pharmacy":        ["pharmacy", "chemist", "drug store"],
+    "Hotel":           ["hotel", "guest house", "lodge"],
+    "Restaurant":      ["restaurant", "eatery", "food canteen"],
+    "Hospital":        ["hospital", "medical centre", "clinic"],
+    "School":          ["school", "academy", "college"],
+    "Logistics":       ["logistics company", "courier service", "transport company"],
+    "Filling Station": ["filling station", "petrol station", "fuel station"],
+    "Hardware Store":  ["hardware store", "building materials", "ironmonger"],
+    "Fashion Shop":    ["fashion shop", "boutique", "clothing store"],
+    "Electronics Store": ["electronics store", "phone shop", "computer shop"],
+    "Church":          ["church", "ministry", "evangelical church"],
+    "Mosque":          ["mosque", "islamic centre", "masjid"],
+    "Market":          ["market", "trade centre", "shopping complex"],
+    "Salon":           ["salon", "barber shop", "hair stylist"],
+    "Bakery":          ["bakery", "bread shop", "confectionery"],
+    "Printing Press":  ["printing press", "print shop", "signage company"],
+    "Clinic":          ["clinic", "medical centre", "health centre"],
+}
 
 def assign_tier(business_type, name):
     combined = (business_type + " " + name).lower()
@@ -85,23 +108,39 @@ def run_scraper(job_id, cities, business_types, max_per_search, user_id):
     jobs[job_id]["status"] = "running"
     jobs[job_id]["added"] = 0
     jobs[job_id]["total_searched"] = 0
-    total = len(cities) * len(business_types)
 
+    # Build full list of searches: city × keyword variations
+    searches = []
     for city in cities:
-        if jobs[job_id].get("cancelled"):
-            break
         for btype in business_types:
+            keywords = BUSINESS_KEYWORDS.get(btype, [btype])
+            for kw in keywords:
+                searches.append((city, btype, kw))
+
+    total = len(searches)
+    jobs[job_id]["total"] = total
+
+    def do_search(city, btype, keyword):
+        if jobs[job_id].get("cancelled"):
+            return 0
+        places = search_places(keyword, city, max_per_search)
+        added = 0
+        for p in places:
             if jobs[job_id].get("cancelled"):
                 break
-            places = search_places(btype, city, max_per_search)
-            for p in places:
-                if jobs[job_id].get("cancelled"):
-                    break
-                if push_lead(supabase, p, city, btype, user_id):
-                    jobs[job_id]["added"] += 1
-            jobs[job_id]["total_searched"] += 1
-            jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
-            time.sleep(0.3)
+            if push_lead(supabase, p, city, btype, user_id):
+                added += 1
+        jobs[job_id]["total_searched"] += 1
+        jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
+        return added
+
+    # Run up to 4 searches in parallel for speed
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(do_search, city, btype, kw): (city, btype, kw) for city, btype, kw in searches}
+        for future in as_completed(futures):
+            if jobs[job_id].get("cancelled"):
+                break
+            jobs[job_id]["added"] += future.result()
 
     if jobs[job_id].get("cancelled"):
         jobs[job_id]["status"] = "cancelled"
