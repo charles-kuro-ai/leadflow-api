@@ -14,9 +14,10 @@ from supabase import create_client
 app = Flask(__name__)
 CORS(app)
 
-GOOGLE_API_KEY = "AIzaSyDzGTwpWp9n5tCP3i3a2LYDjqR48eKddaY"
-SUPABASE_URL   = "https://jyigungffdpqdgknhqao.supabase.co"
-SUPABASE_KEY   = "sb_secret_uLHDXk0yOq9bhlEY-R12EA_HGIwJVBH"
+import os
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+SUPABASE_URL   = os.environ.get("SUPABASE_URL", "https://jyigungffdpqdgknhqao.supabase.co")
+SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")
 
 # Track running jobs
 jobs = {}
