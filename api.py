@@ -16,7 +16,7 @@ CORS(app)
 
 GOOGLE_API_KEY = "AIzaSyDzGTwpWp9n5tCP3i3a2LYDjqR48eKddaY"
 SUPABASE_URL   = "https://jyigungffdpqdgknhqao.supabase.co"
-SUPABASE_KEY   = "sb_publishable_Am7kFgOwqUw6BWWwElm0pw_0nS_wzHP"
+SUPABASE_KEY   = "sb_secret_uLHDXk0yOq9bhlEY-R12EA_HGIwJVBH"
 
 # Track running jobs
 jobs = {}
@@ -100,8 +100,12 @@ def push_lead(supabase, place, city, business_type, user_id):
         "business_type": btype, "notes": address,
         "user_id": user_id,
     }
-    result = supabase.table("leads").insert(lead).execute()
-    return bool(result.data)
+    try:
+        result = supabase.table("leads").insert(lead).execute()
+        return bool(result.data)
+    except Exception as e:
+        print(f"[INSERT ERROR] {name}: {e}")
+        return False
 
 def run_scraper(job_id, cities, business_types, max_per_search, user_id):
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
