@@ -237,6 +237,151 @@ def cancel(job_id):
         return jsonify({"message": "Cancelling..."})
     return jsonify({"error": "Job not found"}), 404
 
+# ── PROFILE ENDPOINTS ─────────────────────────────────────
+
+@app.route("/profile", methods=["GET"])
+def get_profile():
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    user_id = verify_token(token)
+    if not user_id: return jsonify({"error": "Unauthorized"}), 401
+
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        params={"user_id": f"eq.{user_id}", "select": "*"}
+    )
+    data = r.json()
+    if not data: return jsonify({"error": "No profile found"}), 404
+    return jsonify(data[0])
+
+
+@app.route("/users", methods=["GET"])
+def get_users():
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    user_id = verify_token(token)
+    if not user_id: return jsonify({"error": "Unauthorized"}), 401
+
+    # Only admins and branch managers can list users
+    profile_r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        params={"user_id": f"eq.{user_id}", "select": "role"}
+    )
+    profile = profile_r.json()
+    if not profile or profile[0]["role"] not in ["admin", "branch_manager"]:
+        return jsonify({"error": "Forbidden"}), 403
+
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        params={"select": "*", "order": "created_at.desc"}
+    )
+    return jsonify(r.json())
+
+
+@app.route("/create-user", methods=["POST"])
+def create_user():
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    creator_id = verify_token(token)
+    if not creator_id: return jsonify({"error": "Unauthorized"}), 401
+
+    # Check creator role
+    profile_r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        params={"user_id": f"eq.{creator_id}", "select": "role,name"}
+    )
+    profile = profile_r.json()
+    if not profile: return jsonify({"error": "Forbidden"}), 403
+    creator_role = profile[0]["role"]
+    creator_name = profile[0].get("name", "Unknown")
+
+    data = request.json or {}
+    email = data.get("email", "").strip()
+    password = data.get("password", "").strip()
+    name = data.get("name", "").strip()
+    role = data.get("role", "agent")
+
+    if not email or not password or not name:
+        return jsonify({"error": "Email, password and name are required"}), 400
+
+    # Branch managers can only create agents
+    if creator_role == "branch_manager" and role != "agent":
+        return jsonify({"error": "Branch managers can only create agents"}), 403
+
+    # Only admins can create branch managers
+    if role == "branch_manager" and creator_role != "admin":
+        return jsonify({"error": "Only admins can create branch managers"}), 403
+
+    # Create user in Supabase Auth using admin API
+    auth_r = requests.post(
+        f"{SUPABASE_URL}/auth/v1/admin/users",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"email": email, "password": password, "email_confirm": True}
+    )
+
+    if not auth_r.ok:
+        return jsonify({"error": auth_r.json().get("message", "Failed to create user")}), 400
+
+    new_user_id = auth_r.json()["id"]
+
+    # Create profile
+    profile_insert = requests.post(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        json={"user_id": new_user_id, "role": role, "name": name, "created_by": creator_id}
+    )
+
+    if not profile_insert.ok:
+        return jsonify({"error": "User created but profile failed"}), 500
+
+    # Audit log
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/audit_logs",
+        headers=sb_headers(),
+        json={
+            "user_id": creator_id,
+            "user_name": creator_name,
+            "action": f"Created {role}",
+            "target_type": "user",
+            "target_id": new_user_id,
+            "details": {"email": email, "name": name, "role": role}
+        }
+    )
+
+    return jsonify({"message": f"{role} created successfully", "user_id": new_user_id})
+
+
+@app.route("/audit-logs", methods=["GET"])
+def get_audit_logs():
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    user_id = verify_token(token)
+    if not user_id: return jsonify({"error": "Unauthorized"}), 401
+
+    profile_r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        params={"user_id": f"eq.{user_id}", "select": "role"}
+    )
+    profile = profile_r.json()
+    if not profile or profile[0]["role"] not in ["admin", "branch_manager"]:
+        return jsonify({"error": "Forbidden"}), 403
+
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/audit_logs",
+        headers=sb_headers(),
+        params={"select": "*", "order": "created_at.desc", "limit": "200"}
+    )
+    return jsonify(r.json())
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
