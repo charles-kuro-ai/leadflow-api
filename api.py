@@ -101,7 +101,7 @@ def search_places(query, city, max_results=20):
         print(f"[GOOGLE ERROR] {e}")
         return []
 
-def push_lead(place, city, business_type, user_id):
+def push_lead(place, city, business_type, user_id, branch=None):
     name    = place.get("displayName", {}).get("text", "").strip()
     phone   = place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber") or None
     address = place.get("formattedAddress", city).strip()
@@ -120,15 +120,15 @@ def push_lead(place, city, business_type, user_id):
         "tier": tier, "score": score, "source": "Google Maps",
         "status": "New", "agent": None, "income": None,
         "business_type": btype, "notes": address, "user_id": user_id,
+        "branch": branch,  # ← branch scoping
     }
     return sb_insert("leads", lead)
 
-def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id):
+def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id, branch=None):
     jobs[job_id]["status"] = "running"
     jobs[job_id]["added"] = 0
     jobs[job_id]["total_searched"] = 0
 
-    # Build search list: for each city + business_type, use only selected keywords
     searches = []
     for city in cities:
         for btype in business_types:
@@ -140,7 +140,6 @@ def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id
     jobs[job_id]["total"] = total
 
     def do_search(city, btype, keyword):
-        # Stop if cancelled or max_total reached
         if jobs[job_id].get("cancelled"): return 0
         if jobs[job_id]["added"] >= max_total: return 0
 
@@ -153,7 +152,7 @@ def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id
         for p in places:
             if jobs[job_id].get("cancelled"): break
             if jobs[job_id]["added"] >= max_total: break
-            if push_lead(p, city, btype, user_id):
+            if push_lead(p, city, btype, user_id, branch):
                 added += 1
                 jobs[job_id]["added"] += 1
         jobs[job_id]["total_searched"] += 1
@@ -181,6 +180,16 @@ def verify_token(token):
         return user_id
     except: return None
 
+def get_profile(user_id):
+    """Fetch the caller's profile row (role + branch)."""
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        headers=sb_headers(),
+        params={"user_id": f"eq.{user_id}", "select": "role,name,branch"}
+    )
+    data = r.json()
+    return data[0] if data else None
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "LeadFlow API running"})
@@ -206,20 +215,26 @@ def scrape():
     user_id = verify_token(token)
     if not user_id: return jsonify({"error": "Invalid or expired token"}), 401
 
+    # Get the caller's branch so scraped leads are tagged to it
+    caller = get_profile(user_id)
+    caller_branch = caller.get("branch") if caller else None
+
     data = request.json or {}
     cities = data.get("cities", ["Lagos"])
     business_types = data.get("business_types", [])
-    keywords_map = data.get("keywords_map", {})  # e.g. {"Pharmacy": ["pharmacy", "chemist"]}
+    keywords_map = data.get("keywords_map", {})
     max_total = min(int(data.get("max_total", 20)), 500)
 
-    # If no keywords_map provided, use all defaults
     if not keywords_map:
         for btype in business_types:
             keywords_map[btype] = BUSINESS_KEYWORDS.get(btype, [btype])
 
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {"status": "starting", "added": 0, "progress": 0}
-    t = threading.Thread(target=run_scraper, args=(job_id, cities, business_types, keywords_map, max_total, user_id))
+    t = threading.Thread(
+        target=run_scraper,
+        args=(job_id, cities, business_types, keywords_map, max_total, user_id, caller_branch)
+    )
     t.daemon = True
     t.start()
     return jsonify({"job_id": job_id, "message": "Scraper started"})
@@ -240,7 +255,7 @@ def cancel(job_id):
 # ── PROFILE ENDPOINTS ─────────────────────────────────────
 
 @app.route("/profile", methods=["GET"])
-def get_profile():
+def get_profile_route():
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.replace("Bearer ", "").strip()
     user_id = verify_token(token)
@@ -263,21 +278,17 @@ def get_users():
     user_id = verify_token(token)
     if not user_id: return jsonify({"error": "Unauthorized"}), 401
 
-    # Only admins and branch managers can list users
-    profile_r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/profiles",
-        headers=sb_headers(),
-        params={"user_id": f"eq.{user_id}", "select": "role"}
-    )
-    profile = profile_r.json()
-    if not profile or profile[0]["role"] not in ["admin", "branch_manager"]:
+    caller = get_profile(user_id)
+    if not caller or caller["role"] not in ["admin", "branch_manager"]:
         return jsonify({"error": "Forbidden"}), 403
 
-    r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/profiles",
-        headers=sb_headers(),
-        params={"select": "*", "order": "created_at.desc"}
-    )
+    params = {"select": "*", "order": "created_at.desc"}
+
+    # Branch managers only see users in their own branch
+    if caller["role"] == "branch_manager" and caller.get("branch"):
+        params["branch"] = f"eq.{caller['branch']}"
+
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/profiles", headers=sb_headers(), params=params)
     return jsonify(r.json())
 
 
@@ -288,35 +299,33 @@ def create_user():
     creator_id = verify_token(token)
     if not creator_id: return jsonify({"error": "Unauthorized"}), 401
 
-    # Check creator role
-    profile_r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/profiles",
-        headers=sb_headers(),
-        params={"user_id": f"eq.{creator_id}", "select": "role,name"}
-    )
-    profile = profile_r.json()
-    if not profile: return jsonify({"error": "Forbidden"}), 403
-    creator_role = profile[0]["role"]
-    creator_name = profile[0].get("name", "Unknown")
+    caller = get_profile(creator_id)
+    if not caller: return jsonify({"error": "Forbidden"}), 403
+    creator_role   = caller["role"]
+    creator_name   = caller.get("name", "Unknown")
+    creator_branch = caller.get("branch")
 
     data = request.json or {}
-    email = data.get("email", "").strip()
+    email    = data.get("email", "").strip()
     password = data.get("password", "").strip()
-    name = data.get("name", "").strip()
-    role = data.get("role", "agent")
+    name     = data.get("name", "").strip()
+    role     = data.get("role", "agent")
+    # Admin can assign any branch; BM can only create agents in their own branch
+    branch = data.get("branch", "").strip() or None
 
     if not email or not password or not name:
         return jsonify({"error": "Email, password and name are required"}), 400
 
-    # Branch managers can only create agents
     if creator_role == "branch_manager" and role != "agent":
         return jsonify({"error": "Branch managers can only create agents"}), 403
-
-    # Only admins can create branch managers
     if role == "branch_manager" and creator_role != "admin":
         return jsonify({"error": "Only admins can create branch managers"}), 403
 
-    # Create user in Supabase Auth using admin API
+    # BMs automatically inherit their branch for the new agent
+    if creator_role == "branch_manager":
+        branch = creator_branch
+
+    # Create user in Supabase Auth
     auth_r = requests.post(
         f"{SUPABASE_URL}/auth/v1/admin/users",
         headers={
@@ -326,19 +335,20 @@ def create_user():
         },
         json={"email": email, "password": password, "email_confirm": True}
     )
-
     if not auth_r.ok:
         return jsonify({"error": auth_r.json().get("message", "Failed to create user")}), 400
 
     new_user_id = auth_r.json()["id"]
 
-    # Create profile
+    # Create profile with branch
     profile_insert = requests.post(
         f"{SUPABASE_URL}/rest/v1/profiles",
         headers=sb_headers(),
-        json={"user_id": new_user_id, "role": role, "name": name, "created_by": creator_id}
+        json={
+            "user_id": new_user_id, "role": role, "name": name,
+            "created_by": creator_id, "branch": branch
+        }
     )
-
     if not profile_insert.ok:
         return jsonify({"error": "User created but profile failed"}), 500
 
@@ -347,12 +357,10 @@ def create_user():
         f"{SUPABASE_URL}/rest/v1/audit_logs",
         headers=sb_headers(),
         json={
-            "user_id": creator_id,
-            "user_name": creator_name,
+            "user_id": creator_id, "user_name": creator_name,
             "action": f"Created {role}",
-            "target_type": "user",
-            "target_id": new_user_id,
-            "details": {"email": email, "name": name, "role": role}
+            "target_type": "user", "target_id": new_user_id,
+            "details": {"email": email, "name": name, "role": role, "branch": branch}
         }
     )
 
@@ -366,13 +374,8 @@ def get_audit_logs():
     user_id = verify_token(token)
     if not user_id: return jsonify({"error": "Unauthorized"}), 401
 
-    profile_r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/profiles",
-        headers=sb_headers(),
-        params={"user_id": f"eq.{user_id}", "select": "role"}
-    )
-    profile = profile_r.json()
-    if not profile or profile[0]["role"] not in ["admin", "branch_manager"]:
+    caller = get_profile(user_id)
+    if not caller or caller["role"] not in ["admin", "branch_manager"]:
         return jsonify({"error": "Forbidden"}), 403
 
     r = requests.get(
