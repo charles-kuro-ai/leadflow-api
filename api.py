@@ -7,6 +7,7 @@ import requests
 import threading
 import os, uuid, base64, json, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 app = Flask(__name__)
 CORS(app)
@@ -138,32 +139,41 @@ def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id
 
     total = len(searches)
     jobs[job_id]["total"] = total
+    counter_lock = Lock()  # prevents race condition on the add counter
 
     def do_search(city, btype, keyword):
         if jobs[job_id].get("cancelled"): return 0
-        if jobs[job_id]["added"] >= max_total: return 0
+        with counter_lock:
+            if jobs[job_id]["added"] >= max_total: return 0
 
-        remaining = max_total - jobs[job_id]["added"]
-        fetch_count = min(remaining, 20)
-
-        places = search_places(keyword, city, fetch_count)
+        places = search_places(keyword, city, 20)
         print(f"[SEARCH] '{keyword}' in {city} → {len(places)} places")
         added = 0
         for p in places:
             if jobs[job_id].get("cancelled"): break
-            if jobs[job_id]["added"] >= max_total: break
-            if push_lead(p, city, btype, user_id, branch):
-                added += 1
+            with counter_lock:
+                if jobs[job_id]["added"] >= max_total: break
+                # Reserve the slot before inserting to prevent over-shoot
                 jobs[job_id]["added"] += 1
-        jobs[job_id]["total_searched"] += 1
-        jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
+                reserved = True
+            if reserved and push_lead(p, city, btype, user_id, branch):
+                added += 1
+            else:
+                # Insertion failed or duplicate — give the slot back
+                with counter_lock:
+                    jobs[job_id]["added"] -= 1
+            reserved = False
+        with counter_lock:
+            jobs[job_id]["total_searched"] += 1
+            jobs[job_id]["progress"] = round((jobs[job_id]["total_searched"] / total) * 100)
         return added
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(do_search, c, b, kw): (c, b, kw) for c, b, kw in searches}
         for future in as_completed(futures):
             if jobs[job_id].get("cancelled"): break
-            if jobs[job_id]["added"] >= max_total: break
+            with counter_lock:
+                if jobs[job_id]["added"] >= max_total: break
             future.result()
 
     jobs[job_id]["status"] = "cancelled" if jobs[job_id].get("cancelled") else "done"
