@@ -377,6 +377,36 @@ def create_user():
     return jsonify({"message": f"{role} created successfully", "user_id": new_user_id})
 
 
+@app.route("/delete-user", methods=["POST"])
+def delete_user():
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "").strip()
+    caller_id = verify_token(token)
+    if not caller_id: return jsonify({"error": "Unauthorized"}), 401
+
+    caller = get_profile(caller_id)
+    if not caller or caller["role"] != "admin":
+        return jsonify({"error": "Only admins can delete users"}), 403
+
+    data = request.json or {}
+    user_id = data.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+
+    # Delete from Supabase Auth
+    del_r = requests.delete(
+        f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+    )
+    if not del_r.ok and del_r.status_code != 404:
+        return jsonify({"error": del_r.json().get("message", "Failed to delete user")}), 400
+
+    return jsonify({"message": "User deleted"})
+
+
 @app.route("/audit-logs", methods=["GET"])
 def get_audit_logs():
     auth_header = request.headers.get("Authorization", "")
