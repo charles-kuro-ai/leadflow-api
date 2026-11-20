@@ -88,19 +88,35 @@ def calc_score(place):
     return min(score, 100)
 
 def search_places(query, city, max_results=20):
+    """Fetch up to max_results places, paginating past Google's 20-per-page cap."""
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": GOOGLE_API_KEY,
-        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.userRatingCount,places.primaryTypeDisplayName,places.websiteUri"
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.rating,places.userRatingCount,places.primaryTypeDisplayName,places.websiteUri,nextPageToken"
     }
-    body = {"textQuery": f"{query} in {city}, Nigeria", "maxResultCount": min(max_results, 20), "languageCode": "en"}
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=15)
-        return r.json().get("places", [])
-    except Exception as e:
-        print(f"[GOOGLE ERROR] {e}")
-        return []
+    all_places = []
+    page_token = None
+    while len(all_places) < max_results:
+        body = {
+            "textQuery": f"{query} in {city}, Nigeria",
+            "maxResultCount": min(20, max_results - len(all_places)),
+            "languageCode": "en"
+        }
+        if page_token:
+            body["pageToken"] = page_token
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=15)
+            resp = r.json()
+            places = resp.get("places", [])
+            all_places.extend(places)
+            page_token = resp.get("nextPageToken")
+            if not page_token or not places:
+                break
+        except Exception as e:
+            print(f"[GOOGLE ERROR] {e}")
+            break
+    return all_places[:max_results]
 
 def push_lead(place, city, business_type, user_id, branch=None):
     name    = place.get("displayName", {}).get("text", "").strip()
