@@ -118,7 +118,7 @@ def search_places(query, city, max_results=20):
             break
     return all_places[:max_results]
 
-def push_lead(place, city, business_type, user_id, branch=None):
+def push_lead(place, city, business_type, user_id, branch=None, agent_name=None):
     name    = place.get("displayName", {}).get("text", "").strip()
     phone   = place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber") or None
     address = place.get("formattedAddress", city).strip()
@@ -135,13 +135,13 @@ def push_lead(place, city, business_type, user_id, branch=None):
     lead = {
         "name": name, "phone": phone, "location": city,
         "tier": tier, "score": score, "source": "Google Maps",
-        "status": "New", "agent": None, "income": None,
+        "status": "Assigned" if agent_name else "New", "agent": agent_name, "income": None,
         "business_type": btype, "notes": address, "user_id": user_id,
         "branch": branch,  # ← branch scoping
     }
     return sb_insert("leads", lead)
 
-def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id, branch=None):
+def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id, branch=None, agent_name=None):
     jobs[job_id]["status"] = "running"
     jobs[job_id]["added"] = 0
     jobs[job_id]["total_searched"] = 0
@@ -172,7 +172,7 @@ def run_scraper(job_id, cities, business_types, keywords_map, max_total, user_id
                 # Reserve the slot before inserting to prevent over-shoot
                 jobs[job_id]["added"] += 1
                 reserved = True
-            if reserved and push_lead(p, city, btype, user_id, branch):
+            if reserved and push_lead(p, city, btype, user_id, branch, agent_name):
                 added += 1
             else:
                 # Insertion failed or duplicate — give the slot back
@@ -241,9 +241,10 @@ def scrape():
     user_id = verify_token(token)
     if not user_id: return jsonify({"error": "Invalid or expired token"}), 401
 
-    # Get the caller's branch so scraped leads are tagged to it
+    # Get the caller's profile so scraped leads are auto-assigned to them
     caller = get_profile(user_id)
     caller_branch = caller.get("branch") if caller else None
+    caller_name = caller.get("name") if caller else None
 
     data = request.json or {}
     cities = data.get("cities", ["Lagos"])
@@ -259,7 +260,7 @@ def scrape():
     jobs[job_id] = {"status": "starting", "added": 0, "progress": 0}
     t = threading.Thread(
         target=run_scraper,
-        args=(job_id, cities, business_types, keywords_map, max_total, user_id, caller_branch)
+        args=(job_id, cities, business_types, keywords_map, max_total, user_id, caller_branch, caller_name)
     )
     t.daemon = True
     t.start()
